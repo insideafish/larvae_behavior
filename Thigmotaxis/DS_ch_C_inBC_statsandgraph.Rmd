@@ -1,0 +1,204 @@
+---
+title: "DS_chlorpyrifos_C_inBC"
+output: html_document
+---
+```{r}
+library(tidyr)
+library(magrittr)
+library(dplyr)
+library(forcats)
+library(purrr)
+library(rstatix)
+library(emmeans)
+library(ggplot2)
+library(plotrix)
+
+```
+
+upload data
+```{r}
+excel.names <- c("Treatment",
+                 "Trial",
+                 "Well", 
+                 "Time",
+                 "Arena_mean",
+                 "Arena_freq", 
+                 "Arena_cumduration", 
+                 "Arena_cumpercent", 
+                 "Border_mean",
+                 "Border_freq",
+                 "Border_cumduration",
+                 "Border_cumpercent",
+                 "Center_mean",
+                 "Center_freq",
+                 "Center_cumduration",
+                 "Center_cumpercent")
+
+
+all_12dpf <- read.table("Statistics-DS_chlorpyrifos_allC_05052019_inBC.txt", 
+                 sep = "\t", 
+                 skip = 4, 
+                 col.names = excel.names)
+```
+
+tidy data
+```{r}
+all12dpf_tidy.master.df <- all_12dpf %>% 
+  separate(col = Time, into = c("InitialTime", "FinalTime"), sep = "-") %>% 
+  mutate(InitialTime = ifelse(InitialTime == "Start", "0:00:00", InitialTime)) %>%
+  separate(col = InitialTime, into = c("Hours", "Minutes", "Seconds"), sep = ":", remove = F) %>% 
+  select(-Hours, -Seconds) %>% 
+  mutate(Minutes = as.numeric(Minutes)) %>% 
+  mutate(Label = case_when( 
+    Minutes >= 5 & Minutes < 15 ~ "Dark1",
+    Minutes >= 15 & Minutes < 20 ~ "Light1",
+    Minutes >= 20 & Minutes < 30 ~ "Dark2",
+    Minutes >= 30 & Minutes < 35 ~ "Light2",
+    Minutes >= 35 ~ "Dark3")) %>% 
+  filter(Minutes >= 5 & Minutes < 45) 
+```
+
+Calculate time in border vs. center
+```{r}
+all12dpf_timespent <- all12dpf_tidy.master.df %>% 
+  mutate(Border_portion = Border_cumduration/Arena_cumduration, 
+         Center_portion = Center_cumduration/Arena_cumduration, 
+         Label = as.factor(Label)) %>% 
+  select(Treatment, Trial, Well, Border_portion, Center_portion, Label) %>%
+  unite(newID, Trial, Well, sep = "_") %>% 
+  group_by(Treatment, newID, Label) %>% 
+  gather(key = Location, value = Portion_time,
+         -Treatment, -newID, -Label) %>% 
+  ungroup() %>% 
+  mutate(Location = fct_recode(Location,
+    "border" = "Border_portion", 
+    "center" = "Center_portion"), 
+    Treatment = fct_relevel(Treatment, "Vehicle", "Low", "Medium", "High"))
+  
+
+```
+
+
+STATS
+```{r}
+
+#SHAPIRO- TEST FOR NORMAL DISTRIBUTION
+C_inbc_shapiro <- all12dpf_timespent %>%
+  group_by(Label) %>%
+  nest() %>% 
+   ungroup() %>% 
+  mutate(shapiro = map(data, ~tidy(shapiro.test(.x$Portion_time)))) %>% 
+  unnest(shapiro)
+  View(C_inbc_shapiro)
+
+#LEVENES- TEST FOR HOMOGENEITY OF VARIANCE
+C_inbc_levenes <- all12dpf_timespent %>%
+  group_by(Label) %>%
+  nest() %>% 
+  mutate(levene = map(data, ~levene_test(.x, Portion_time ~ Treatment))) %>% 
+  unnest(levene) 
+View(C_inbc_levenes)
+
+#KRUSKALL
+C_inbc_KRUSKAL <- all12dpf_timespent %>%
+  group_by(Label, Treatment) %>%
+  nest() %>% 
+  mutate(kruskal = map(data, ~kruskal_test(.x, Portion_time ~ Location))) %>% 
+  unnest(kruskal) 
+View(C_inbc_KRUSKAL)
+
+#DUNNET- TRT V CTRL
+C_inbc_dunnetx <- all12dpf_timespent %>% 
+  group_by(Label, Location) %>% 
+  nest() %>% 
+  mutate(dunnetx = map(data, 
+                   ~tidy(contrast(emmeans((ref_grid(lm(Portion_time ~ Treatment, data=.x))),"Treatment"), method="trt.vs.ctrl")))) %>% 
+  unnest(dunnetx)
+View(C_inbc_dunnetx)
+#edit for exporting
+C_inbc_DUNNETforprint <- C_inbc_dunnetx %>% 
+  select(-data) %>% 
+  mutate(significant = case_when(p.value > 0.05 ~ "ns",
+                                 p.value <= 0.01 ~"**", 
+                                 p.value <= 0.05 ~"*")) %>% 
+  ungroup()
+C_inbc_DUNNETforprint
+
+#Export
+write.table(C_inbc_DUNNETforprint, "CH_inBC_96h_dunnetx.txt", 
+            sep = "\t", quote = F, row.names = F)
+
+
+#edit stats to add to graph
+C_statsgraph2 <- C_inbc_DUNNETforprint %>% 
+  filter(Location != "border") %>% 
+  mutate(Significant = case_when(
+    p.value <= 0.01 ~ "SS",
+     p.value <= 0.05 ~ "S",
+     p.value >= 0.05 ~ "NS")) %>%
+  unite("Treatment_temp", Label, Location, level1, sep = "_") %>% 
+  dplyr::select(Treatment_temp, Significant)
+
+C_statsgraph2
+
+```
+
+
+Merge data set and stats for graphing
+```{r}
+C_graphing <- all12dpf_timespent %>%
+  mutate(newID = as.factor(newID), 
+         Location = as.factor(Location)) %>% 
+  filter(!is.na(Location)) %>% 
+  group_by(Treatment, Label, Location) %>% 
+  summarise(Portion = mean(Portion_time, na.rm = T), 
+            Portion_SE = std.error(Portion_time, na.rm = T), 
+            upper = Portion + Portion_SE, 
+            lower = Portion - Portion_SE) %>% 
+  ungroup() %>% 
+  unite("Treatment_temp", Label, Location, Treatment, sep = "_") %>% 
+  mutate(Treatment_temp = as.factor(Treatment_temp)) %>% 
+  merge(C_statsgraph2, by.x = "Treatment_temp", by.y = "Treatment_temp", all = T) %>% 
+  separate(Treatment_temp, into = c("Label", "Location", "Treatment"), sep = "_") %>% 
+  mutate(Label = as.factor(Label), 
+         Location = as.factor(Location), 
+         Treatment= as.factor(Treatment)) %>% 
+  mutate(Treatment = fct_relevel(Treatment, "Vehicle", 
+                                 "Low", "Medium", "High"), 
+         Label = fct_relevel(Label, "Dark1", "Light1",
+                             "Dark2", "Light2", "Dark3"), 
+         Location = fct_relevel(Location, "center", "border"))
+
+C_graphing
+```
+
+Graph
+```{r}
+graphcolors3 <- c("black", "gray69")
+
+C_graph <- C_graphing %>%
+  ggplot(aes(x=Treatment, y= Portion, group=Treatment, fill = Location)) +
+  geom_bar(stat = "identity") +
+  geom_text(data = filter(C_graphing, Significant == "S"), label = "*", y = 0.25, size=10) +
+  geom_text(data = filter(C_graphing, Significant == "SS"), label = "**", y = 0.25, size=10) +
+  facet_grid(. ~Label) +
+  theme_bw() +
+  labs(title = "96 h Exposure") +
+  ylab("Portion of time") +
+  geom_hline(yintercept = 0.5, linetype="dashed", color="white", size=0.75) +
+  theme(axis.text.x = element_text(vjust= 0.6, angle = 45, size = 12), 
+        axis.text.y = element_text(size = 12), 
+        strip.text.x = element_text(size = 14), 
+        axis.title.x = element_text(size = 14), 
+        axis.title.y = element_text(size = 14), 
+        legend.text = element_text(size=12), 
+        legend.title = element_text(size=12), 
+        plot.title = element_text(size=18)) +
+  scale_fill_manual(values = graphcolors3) +
+  scale_x_discrete(labels = c("Vehicle", expression(0.05*mu*g/L),
+                              expression(.5*mu*g/L), expression(5*mu*g/L)))
+
+C_graph
+
+```
+
