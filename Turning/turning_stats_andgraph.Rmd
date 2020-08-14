@@ -1,0 +1,207 @@
+---
+title: "turning_stats_and_graph"
+output: html_document
+---
+
+```{r}
+library(tidyr)
+library(magrittr)
+library(dplyr)
+library(forcats)
+library(purrr)
+library(emmeans)
+library(rstatix)
+library(plotrix)
+library(ggplot2)
+```
+
+upload data
+```{r}
+Cturningstats <- read.csv("ch_c_turning_data.csv") %>% 
+  select(-X) %>% 
+  mutate(Treatment = fct_relevel(Treatment, "Vehicle", "Low", "Medium", "High"))
+Cturningstats
+```
+
+STATS
+```{r}
+#SHAPIRO-  tests for normal distribution
+C_shapiro <- Cturningstats %>%
+  gather(Variable, Value, -Treatment, -newID, -Label) %>%
+  group_by(Variable, Label) %>%
+  nest() %>% 
+  ungroup() %>%
+  mutate(shapiro = map(data, ~tidy(shapiro.test(.x$Value)))) %>%
+  unnest(shapiro)
+  View(C_shapiro)
+  
+#LEVENES- TESTS FOR HOMOGENEITY OF VARIANCE
+C_levene <- Cturningstats %>%
+  gather(Variable, Value, -Treatment, -newID, -Label) %>%
+  group_by(Variable, Label) %>%
+  nest() %>% 
+  mutate(levene = map(data, ~levene_test(.x, Value ~ Treatment))) %>% 
+  unnest(levene) 
+View(C_levene)
+
+#KRUSKALL-
+C_KRUSKAL <- Cturningstats %>%
+  group_by(Label) %>%
+  gather(Variable, Value, -Treatment, -newID, -Label) %>%
+  group_by(Variable, Label) %>%
+  nest() %>% 
+  mutate(kruskal = map(data, ~kruskal_test(.x, Value ~ Treatment))) %>% 
+  unnest(kruskal) 
+View(C_KRUSKAL)
+
+
+#DUNNETS- trt vs. control
+C_dunnetx <- Cturningstats %>% 
+  gather(Variable, Value, -Treatment, -newID, -Label) %>%
+  group_by(Variable, Label) %>%
+  nest() %>% 
+  mutate(dunnetx = map(data, 
+                   ~tidy(contrast(emmeans((ref_grid(lm(Value ~ Treatment, data=.x))),"Treatment"), method="trt.vs.ctrl")))) %>% 
+  unnest(dunnetx) %>% 
+    mutate(significant = case_when(p.value > 0.05 ~ "ns",
+                                   p.value <= 0.01 ~"**",
+                                   p.value <= 0.05 ~"*"))
+
+View(C_dunnetx)
+
+#For exporting
+C_DUNNETforprint <- C_dunnetx %>% 
+  select(-data) %>% 
+  ungroup()
+View(C_DUNNETforprint)
+
+#export this data
+write.csv(C_DUNNETforprint, "C_allturning_dunnetx_results.csv")
+
+```
+
+Format stats to add to graph
+```{r}
+C_stats_forgraph <- C_DUNNETforprint %>% 
+  mutate(Significant = case_when(
+    p.value <= 0.01 ~ "SS",
+     p.value <= 0.05 ~ "S",
+     p.value >= 0.05 ~ "NS")) %>%
+   mutate(Variable = fct_recode(Variable,
+                                "Turn Angle"= "Turn_angle",
+                                "Meander" = "Meander_mean",
+                                "Angular Velocity" =  "Ang_Velocity",
+                                "CW Rotations" =  "Rotation_CW",
+                                "CCW Rotations" = "Rotation_CCW")) %>%
+  unite("Treatment_temp", Label, Variable, level1, sep = "_") %>% 
+  select(Treatment_temp, Significant)
+
+C_stats_forgraph
+```
+
+
+Generate Z-score- this is for graphing only
+```{r}
+#C- zscore generation
+C_turnzscore <- Cturningstats %>% 
+  gather(Variable, Value, -Treatment, -newID, -Label) %>% 
+  group_by(Variable, Label) %>%
+  filter(!is.na(Value)) %>% 
+  mutate(zscore_group = ((Value - mean(Value)) / sd(Value))) %>% 
+  ungroup() %>% 
+  mutate(zscore_ungrouped = (Value - mean(Value)) / sd(Value))
+  View(C_turnzscore)
+
+# Means for each Treatment
+C_turnzscore_mean <- C_turnzscore %>%
+  select(-zscore_ungrouped, -Value) %>% 
+  group_by(Treatment, Label, Variable) %>%
+  spread(key = Variable, value = zscore_group) %>% 
+  group_by(Treatment, Label) %>%
+  summarise(Turn_angle = mean(Turn_angle, na.rm = T), 
+            Meander = mean(Meander_mean, na.rm = T), 
+            Ang_Velocity = mean(Ang_Velocity, na.rm = T), 
+            Rotation_CW = mean(Rotation_CW, na.rm = T), 
+            Rotation_CCW = mean(Rotation_CCW, na.rm = T)) %>% 
+   gather(Parameter, Value, -Label, -Treatment) %>% 
+   mutate(Parameter = as.factor(Parameter)) %>% 
+  ungroup()
+View(C_turnzscore_mean)
+
+#NORMALIZE TO VEHICLE - graph these
+C_turnzsnorm <- C_turnzscore_mean %>%
+  group_by(Treatment, Label, Parameter) %>%
+  spread(key=Treatment, value = Value) %>%
+  mutate(Controldiff = (Vehicle - Vehicle), 
+         Lowdiff = (Low - Vehicle), 
+         Meddiff = (Medium - Vehicle), 
+         Highdiff = (High - Vehicle)) %>% 
+  select(-Vehicle, -Low, -Medium, -High) %>% 
+  gather(key = "Treatment", value = "Value", -Label, -Parameter) %>% 
+  ungroup() %>% 
+  mutate(Treatment = as.factor(Treatment)) %>% 
+  mutate(Parameter = fct_recode(Parameter,
+                                "Turn Angle"= "Turn_angle",
+                                "Meander" = "Meander",
+                                "Angular Velocity" =  "Ang_Velocity",
+                                "CW Rotations" =  "Rotation_CW",
+                                "CCW Rotations" = "Rotation_CCW"),
+         Treatment = fct_recode(Treatment,
+                                "Vehicle" = "Controldiff",
+                                "Low" = "Lowdiff",
+                                "Med" = "Meddiff",
+                                "High" = "Highdiff")) %>% 
+mutate(Treatment = fct_relevel(Treatment, "Vehicle", "High", "Med", "Low"),
+       Label = fct_relevel(Label, "Dark1", "Light1", "Dark2", "Light2", "Dark3")) %>% 
+mutate(Parameter = fct_relevel(Parameter, "Turn Angle", "Meander", "Angular Velocity", "CW Rotations", 
+                               "CCW Rotations"))
+
+C_turnzsnorm
+```
+
+Merge stats results to the zscores
+```{r}
+C_turnformerge <- C_turnzsnorm %>% 
+  mutate(Treatment = fct_recode(Treatment, "Medium" = "Med")) %>%  #this is just me fixing inconsistencies in naming
+  unite(Treatment_temp, Label, Parameter, Treatment) %>% 
+  full_join(C_stats_forgraph, by = "Treatment_temp") %>% 
+  mutate(Significant = ifelse(is.na(Significant), "NS", Significant)) %>% 
+  separate(Treatment_temp, into = c("Label", "Parameter", "Treatment"), sep = "_") %>% 
+  mutate(Label = as.factor(Label),
+         Parameter = as.factor(Parameter),
+         Treatment = as.factor(Treatment)) %>% 
+  mutate(Treatment = fct_relevel(Treatment, "Vehicle", "High", "Medium", "Low"),
+       Label = fct_relevel(Label, "Dark1", "Light1", "Dark2", "Light2", "Dark3")) %>%
+  mutate(Parameter = fct_relevel(Parameter,"Turn Angle", "Meander", "Angular Velocity",
+                                 "CW Rotations", "CCW Rotations"))
+
+C_turnformerge
+
+```
+
+graph heatmap
+```{r}
+cmax_abs_val <- max(abs(C_turnzsnorm$Value))
+
+C_turnheat <- C_turnformerge %>%
+  filter(Treatment != "Vehicle") %>% 
+  ggplot(aes(x=Label, y=Treatment, group=Treatment, fill=Value)) +
+  geom_tile(color = "white", size = 0.5) +
+  geom_text(data = filter(C_turnformerge, Significant == "S"), label = "*", color = "black", fontface="bold") +
+  geom_text(data = filter(C_turnformerge, Significant == "SS"), label = "**", color = "black", fontface="bold") +
+  scale_fill_distiller(palette = "BrBG", limits = c(-cmax_abs_val, cmax_abs_val)) +
+  theme_bw() +
+  theme(axis.text.x = element_text(vjust= 0.6, angle = 45)) +
+  labs(title = "96 h exposure",
+       fill = "Z-score") +
+  xlab(label = "Cycle") +
+  scale_y_discrete(labels = c(expression(5*mu*g/L), expression(0.5*mu*g/L),
+                              expression(0.05*mu*g/L))) +
+  facet_grid(. ~Parameter)
+
+C_turnheat
+
+ggsave("Permethrin_96h_turnheatmaptest.pdf", plot = C_turnheat, width = 8, height = 3, units  = 'in',
+       dpi = 300, limitsize = TRUE) #play with these widths/heights to what you need
+```
+
