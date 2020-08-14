@@ -1,0 +1,41 @@
+---
+title: "DS_C_chlor_DRC"
+output: html_document
+---
+
+```{r}
+library(tidyr)
+library(magrittr)
+library(dplyr)
+library(forcats)
+library(purrr)
+library(scales)
+```
+
+#Run this code to tidy and rescale the data before dose response analysis
+
+```{r}
+C <- read.csv("C_chlor_tidy_ArenaOnly.csv")
+
+DM_96h <- C %>% 
+  select(Treatment, Replicate, Minutes, Well, Label, DistanceMoved) %>% 
+  unite(newID, Well, Replicate) %>%
+  mutate(Treatment = fct_relevel(Treatment, "Vehicle", "Low", "Medium", "High"),
+         Treatment= fct_recode(Treatment, "0" = "Vehicle", 
+                               "0.05" = "Low", 
+                               "0.5" = "Medium", 
+                               "5" = "High"), 
+         Label = fct_relevel(Label, "Dark1", "Light1", "Dark2", "Light2", "Dark3")) %>% 
+  group_by(Treatment, newID, Label) %>% 
+  summarize(MeanDM = mean(DistanceMoved)) %>% 
+  spread(key=Label, value=MeanDM) %>% 
+  ungroup() %>% 
+    mutate(Dark1 = rescale(Dark1, to=c(0,1)),
+         Light1 = rescale(Light1, to=c(0,1)), 
+         Dark2 = rescale(Dark2, to=c(0,1)), 
+         Light2 = rescale(Light2, to=c(0,1)), 
+         Dark3 = rescale(Dark3, to=c(0,1)))
+  
+write.csv(DM_96h, "DM_96h.csv")
+```
+
