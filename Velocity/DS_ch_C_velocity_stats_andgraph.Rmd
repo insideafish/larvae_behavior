@@ -1,0 +1,343 @@
+---
+title: "Chlor_C_velocity_stats_andgraph"
+output: html_document
+---
+```{r}
+library(tidyr)
+library(forcats)
+library(purrr)
+library(dplyr)
+library(magrittr)
+library(broom)
+library(plotrix)
+library(emmeans)
+library(ggplot2)
+library(RColorBrewer)
+library(ggrepel)
+```
+
+
+
+upload data
+```{r}
+excel.names <- c("Treatment",
+                 "Trial",
+                 "Well",
+                 "Time",
+                 "Location",
+                 "Velocity",
+                 "Cruising Freq",
+                 "Cruising duration",
+                 "Bursting Freq",
+                 "Bursting duration",
+                 "Freezing freq",
+                 "Freezing duration",
+                 "Turn Angle", 
+                 "Meander",
+                 "Angular Velocity", 
+                 "Rotation CW", 
+                 "Rotation CCW")
+
+c1 <- read.table("Statistics-DS_chlorpyrifos_allC_05052019.txt", 
+                 sep = "\t", 
+                 skip = 4, 
+                 col.names = excel.names)
+
+
+
+```
+
+
+Tidy data
+```{r}
+Ctidy.master.df <- c1 %>% 
+  separate(col = Time, into = c("InitialTime", "FinalTime"), sep = "-") %>% 
+  mutate(InitialTime = ifelse(InitialTime == "Start", "0:00:00", InitialTime)) %>% 
+  separate(col = InitialTime, into = c("Hours", "Minutes", "Seconds"), sep = ":", remove = F) %>% 
+  select(-Hours, -Seconds) %>% 
+  mutate(Minutes = as.numeric(Minutes)) %>%
+  mutate(Label = case_when( 
+    Minutes >= 5 & Minutes < 15 ~ "Dark1",
+    Minutes >= 15 & Minutes < 20 ~ "Light1",
+    Minutes >= 20 & Minutes < 30 ~ "Dark2",
+    Minutes >= 30 & Minutes < 35 ~ "Light2",
+    Minutes >= 35 ~ "Dark3")) %>% 
+  filter(Minutes >= 5 & Minutes < 45) %>% 
+  mutate(Velocity = as.numeric(as.character(Velocity)), 
+         Meander = as.numeric(as.character(Meander)), 
+         Label = as.factor(Label)) 
+
+Ctidy.master.df
+
+str(Ctidy.master.df)
+```
+
+
+
+```{r}
+Ctidymaster.forstat <- Ctidy.master.df %>% 
+  unite(col = newID, Trial, Well, sep = "_") %>% 
+  group_by(Treatment, Label, newID) %>% 
+  summarise(MeanVelocity = mean(Velocity), 
+            Cruise.freq = mean(Cruising.Freq),
+            Cruising.dur = mean(Cruising.duration), 
+            Burst.freq = mean(Bursting.Freq), 
+            Burst.dur = mean(Bursting.duration), 
+            Freeze.freq = mean(Freezing.freq),
+            Freeze.dur = mean(Freezing.duration)) %>% 
+  ungroup() %>% 
+    mutate(Label = as.factor(Label), 
+         newID = as.factor(newID), 
+         Treatment = fct_relevel(Treatment, "Vehicle", "Low", "Medium", "High"))
+
+Ctidymaster.forstat
+```
+
+
+STATISTICS
+```{r}
+
+#SHAPIRO
+C_shapiro <- Ctidymaster.forstat %>%
+  gather(Variable, Value, -Treatment, -newID, -Label) %>%
+  group_by(Variable, Label) %>%
+  nest() %>% 
+  ungroup() %>%
+  mutate(shapiro = map(data, ~tidy(shapiro.test(.x$Value)))) %>%
+  unnest(shapiro)
+   View(C_shapiro)
+
+#LEVENES- TEST FOR HOMOGENEITY OF VARIANCE
+C_levene <- Ctidymaster.forstat %>%
+  gather(Variable, Value, -Treatment, -newID, -Label) %>%
+  group_by(Variable, Label) %>%
+  nest() %>% 
+  mutate(levene = map(data, ~levene_test(.x, Value ~ Treatment))) %>% 
+  unnest(levene) 
+View(C_levene)
+
+#KRUSKALL
+C_KRUSKAL <- Ctidymaster.forstat %>%
+  group_by(Label) %>%
+  gather(Variable, Value, -Treatment, -newID, -Label) %>%
+  group_by(Variable, Label) %>%
+  nest() %>% 
+  mutate(kruskal = map(data, ~kruskal_test(.x, Value ~ Treatment))) %>% 
+  unnest(kruskal) 
+View(C_KRUSKAL)
+
+#DUNN'S
+C_DUNNS <- Ctidymaster.forstat %>%
+  gather(Variable, Value, -Treatment, -newID, -Label) %>%
+  group_by(Variable, Label) %>%
+  nest() %>% 
+  mutate(dunns = map(data, ~dunn_test(.x, Value ~ Treatment, p.adjust.method = "bonferroni"))) %>% 
+  unnest(dunns)
+View(C_DUNNS)
+
+#DUNNET- TRT V CTRL
+C_dunnetx <- Ctidymaster.forstat %>% 
+  gather(Variable, Value, -Treatment, -newID, -Label) %>%
+  group_by(Variable, Label) %>%
+  nest() %>% 
+  mutate(dunnetx = map(data, 
+                   ~tidy(contrast(emmeans((ref_grid(lm(Value ~ Treatment, data=.x))),"Treatment"), method="trt.vs.ctrl")))) %>% 
+  unnest(dunnetx) %>% 
+    mutate(significant = case_when(p.value > 0.05 ~ "ns",
+                                   p.value <= 0.01 ~"**",
+                                   p.value <= 0.05 ~"*"))
+
+View(C_dunnetx)
+
+#edit for exporting
+C_DUNNETforprint <- C_dunnetx %>% 
+  select(-data) %>% 
+  ungroup()
+View(C_DUNNETforprint)
+
+
+write.csv(C_DUNNETforprint, "formatted_files/Chlorpyrifos_Velocity_allC_DUNNETX.csv")
+```
+
+Edit stats output to merge with data for graphing
+```{r}
+C_Tstatgraph2 <- C_DUNNETforprint %>% 
+  mutate(Significant = case_when(
+    p.value <= 0.01 ~ "SS",
+     p.value <= 0.05 ~ "S",
+     p.value >= 0.05 ~ "NS")) %>%
+   mutate(Variable = fct_recode(Variable, V = "MeanVelocity",
+                                CD = "Cruising.dur",
+                                CF = "Cruise.freq",
+                                BD = "Burst.dur",
+                                BF = "Burst.freq",
+                                FD = "Freeze.dur",
+                                FF = "Freeze.freq")) %>%  
+  unite("Treatment_temp", Label, Variable, level1, sep = "_") %>% 
+  select(Treatment_temp, Significant)
+
+C_Tstatgraph2
+```
+
+
+
+Zscore generation - this is for graphing only
+```{r}
+
+C_velocity <- Ctidy.master.df %>% 
+  unite(col = newID, Trial, Well, sep = "_") %>% 
+  group_by(Treatment, Label, newID) %>% 
+  summarise(Velocity = mean(Velocity, na.rm = T), 
+            Cruise.freq = mean(Cruising.Freq),
+            Cruising.dur = mean(Cruising.duration), 
+            Burst.freq = mean(Bursting.Freq), 
+            Burst.dur = mean(Bursting.duration), 
+            Freeze.freq = mean(Freezing.freq),
+            Freeze.dur = mean(Freezing.duration)) %>% 
+    ungroup() %>% 
+  mutate(Label = as.factor(Label), 
+         newID = as.factor(newID))
+C_velocity 
+str(C_velocity)
+
+Czscore = C_velocity %>% 
+  gather(Variable, Value, -Treatment, -newID, -Label) %>% 
+  group_by(Variable, Label) %>%
+  filter(!is.na(Value)) %>% 
+  mutate(zscore_group = ((Value - mean(Value)) / sd(Value))) %>% 
+  ungroup() %>% 
+  mutate(zscore_ungrouped = (Value - mean(Value)) / sd(Value))
+  View(Czscore)
+
+ # Means for each Treatment 
+Czscore_means <- Czscore %>%
+  select(-zscore_ungrouped, -Value) %>% 
+  group_by(Treatment, Label, Variable) %>%
+  spread(key = Variable, value = zscore_group) %>% 
+  group_by(Treatment, Label) %>%
+  summarise(Velocity = mean(Velocity, na.rm = T), 
+            Cruise.freq = mean(Cruise.freq), 
+            Cruising.dur = mean(Cruising.dur), 
+            Burst.freq = mean(Burst.freq), 
+            Burst.dur = mean(Burst.dur), 
+            Freeze.freq = mean(Freeze.freq), 
+            Freeze.dur = mean(Freeze.dur)) %>% 
+   gather(Parameter, Value, -Label, -Treatment) %>% 
+   mutate(Parameter = as.factor(Parameter))
+View(Czscore_means)
+
+#NORMALIZE TO VEHICLE - use this to graph
+CZnorm <- Czscore_means %>%
+  group_by(Treatment, Label, Parameter) %>%
+  spread(key=Treatment, value = Value) %>%
+  mutate(Controldiff = (Vehicle - Vehicle), 
+         Lowdiff = (Low - Vehicle), 
+         Meddiff = (Medium - Vehicle), 
+         Highdiff = (High - Vehicle)) %>% 
+  select(-Vehicle, -Low, -Medium, -High) %>% 
+  gather(key = "Treatment", value = "Value", -Label, -Parameter) %>% 
+  ungroup() %>% 
+  mutate(Treatment = as.factor(Treatment)) %>% 
+  mutate(Parameter = fct_recode(Parameter,
+                                "Cruising\nDuration"= "Cruise.freq",
+                                "Cruising\nFreq" = "Cruising.dur",
+                                "Bursting\nDuration" =  "Burst.dur",
+                                "Bursting\nFreq" =  "Burst.freq",
+                                "Freezing\nDuration" = "Freeze.dur",
+                                "Freezing\nFreq" = "Freeze.freq", 
+                                "Velocity" = "Velocity"), 
+         Treatment = fct_recode(Treatment, 
+                                "Vehicle" = "Controldiff", 
+                                "Low" = "Lowdiff",
+                                "Med" = "Meddiff", 
+                                "High" = "Highdiff")) %>% 
+mutate(Treatment = fct_relevel(Treatment, "Vehicle", "Low", "Med", "High"), 
+       Label = fct_relevel(Label, "Dark1", "Light1", "Dark2", "Light2", "Dark3")) %>% 
+mutate(Parameter = fct_relevel(Parameter, "Cruising\nDuration",
+ "Cruising\nFreq", "Bursting\nDuration",
+ "Bursting\nFreq", "Freezing\nDuration",
+ "Freezing\nFreq", "Velocity"))
+
+CZnorm
+```
+
+
+Merge Zscores and stats for graphing
+```{r}
+CZ_merge <- CZnorm %>% 
+  mutate(Treatment = fct_recode(Treatment, "Medium" = "Med")) %>% 
+  mutate(Variable = fct_recode(Parameter, V = "Velocity",
+                                CD = "Cruising\nDuration",
+                                CF = "Cruising\nFreq",
+                                BD = "Bursting\nDuration",
+                                BF = "Bursting\nFreq",
+                                FD = "Freezing\nDuration",
+                                FF = "Freezing\nFreq")) %>% 
+   unite(Treatment_temp, Label, Variable,Treatment) %>% 
+  select(-Parameter) %>% 
+  full_join(C_Tstatgraph2, by = "Treatment_temp") %>% 
+  mutate(Significant = ifelse(is.na(Significant), "NS", Significant)) %>% 
+  separate(Treatment_temp, into = c("Label", "Parameter", "Treatment"), sep = "_") %>% 
+  mutate(Time = "96 h", 
+         Label = as.factor(Label), 
+         Parameter = as.factor(Parameter), 
+         Treatment = as.factor(Treatment)) %>% 
+    mutate(Time = as.factor(Time),
+         Label = as.factor(Label),
+         Label = fct_relevel(Label, "Dark1", "Light1", "Dark2", "Light2", "Dark3"),
+         Treatment = as.factor(Treatment),
+         Treatment = fct_relevel(Treatment, "Vehicle", "Low", "Medium", "High"),
+         Parameter = as.factor(Parameter),
+         Parameter = fct_relevel(Parameter, "CD", "CF", "BD", "BF", "FD", "FF", "V")) %>% 
+   mutate(Significance = as.factor(Significant), 
+         Significance = fct_recode(Significance, 
+                                  "p>0.05" = "NS", 
+                                  "p<0.05" = "S", 
+                                  "p<0.01" = "SS"))
+
+CZ_merge
+```
+
+Graph
+```{r}
+new_colors <- c("goldenrod1", "white", "gray82", "black")
+veh <- paste("Vehicle")
+low <- expression(0.05~mu*g~l^-1)
+mid <- expression(0.5~mu*g~l^-1)
+high <- expression(5~mu*g~l^-1)
+labels <- list(veh, low, mid, high)
+
+Chlorpyrifos_velocity_spider <- CZ_merge %>% 
+  arrange(as.numeric(Parameter)) %>%
+  ggplot(aes(x=Parameter, y=Value, group=rev(Treatment), color=Treatment)) + 
+  scale_colour_manual(name="Treatment",
+     values = new_colors,
+     labels = labels) +
+scale_fill_manual(values = rev(new_colors), guide=F) +
+  geom_polygon(fill = NA, size=1, ) + 
+  ylim(-2, 2) +
+  theme_dark() +
+  facet_grid(~Label) +
+  theme(panel.grid.major = element_line(colour = "gray"),
+        plot.margin = margin(0,0,0,0),
+        axis.text.x = element_text(size=6.2, color = "black", face = "bold"),
+        strip.text = element_text(size=10),
+        axis.title = element_text(size=14),
+        plot.title = element_text(size=18)) +
+    coord_polar(clip="off") +
+  geom_point(data = filter(CZ_merge, Treatment == "High"), size=1.3, alpha = 0.5, color="black", shape=21, fill="black", stroke=0.6) +
+  geom_point(data = filter(CZ_merge, Treatment == "Medium"), size=1.3, alpha = 0.5, color="black", shape=21, fill="gray82", stroke=0.6) +
+  geom_point(data = filter(CZ_merge, Treatment == "Low"), size=1.3, alpha = 0.5, color="black", shape=21, fill="white", stroke=0.6) +
+  geom_point(data = filter(CZ_merge, Treatment == "Vehicle"), size=1.3, alpha = 0.5, color="black", shape=21, fill="goldenrod1", stroke=0.6) +
+  geom_point(data = filter(CZ_merge, Significance == "p<0.05"), size=1.3, alpha = 0.7, color = "red", shape=21, stroke = 0.6) +
+  geom_point(data=filter(CZ_merge, Significance == "p<0.01"), size=1.3, alpha = 0.7, color="red", shape=5, stroke = 0.6) +
+  labs(title = "Chlorpyrifos- 96 h") +
+  ylab("Z-score")
+
+Chlorpyrifos_velocity_spider
+
+ggsave("Chlorpyrifos_velocity_spider.pdf", plot = Chlorpyrifos_velocity_spider, width=25, height = 14, units = "cm", limitsize = T)
+
+
+```
+
